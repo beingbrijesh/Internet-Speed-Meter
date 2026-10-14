@@ -1,0 +1,11 @@
+build/
+dist/
+*.spec
+*.zip
+*.bak
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+speed_meter.lock
+optimize_speed_meter.py

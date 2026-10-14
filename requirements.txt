@@ -1,0 +1,4 @@
+rumps
+psutil
+pyobjc-framework-Cocoa
+certifi
