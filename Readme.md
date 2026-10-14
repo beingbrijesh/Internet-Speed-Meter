@@ -430,7 +430,7 @@ Internet-Speed-Meter/
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests are welcome. See [CONTRIBUTING.md](Contributing.md).
 
 ## License
 
