@@ -51,6 +51,7 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSGraphicsContext,
     NSMenu,
+    NSMenuItem,
     NSMutableParagraphStyle,
     NSPanel,
     NSParagraphStyleAttributeName,
@@ -70,6 +71,8 @@ from Foundation import (
     NSMakePoint,
     NSMakeRect,
     NSObject,
+    NSRunLoop,
+    NSRunLoopCommonModes,
     NSString,
     NSUserDefaults,
 )
@@ -82,18 +85,13 @@ if hasattr(objc, "ObjCPointerWarning"):
 # --------------------------------------------------------------------------
 # Tunables
 # --------------------------------------------------------------------------
-MENUBAR_FONT_SIZE = 9.0      # numbers
-ARROW_FONT_SIZE = 6.0        # arrow glyphs
-MENUBAR_LINE_HEIGHT = 10.0   # distance between the two lines
-MENUBAR_GAP = 1.5            # space between arrow and number
+MENUBAR_FONT_SIZE = 8.0      # numbers (monospaced)
+ARROW_FONT_SIZE = 5.5        # arrow glyphs
+MENUBAR_LINE_HEIGHT = 8.5    # distance between lines (leaves ~3.5 pt top & bottom padding)
+MENUBAR_GAP = 2.0            # space between arrow and number
 MENUBAR_PAD = 6.0            # left/right padding inside the menu bar item
-PILL_RADIUS = 7.0            # corner radius of the "selected" highlight
+MENUBAR_DIGITS = 4           # fixed character width (e.g. "999K", "1.2M") to prevent size jitter
 TICK_TOLERANCE = 0.3         # timer slack (s) so macOS can coalesce wakeups
-
-# Panel glass
-GLASS_CLEAR = True           # macOS 26+: True = clearer glass, False = regular glass
-GLASS_TINT_ALPHA = 0.48      # macOS 26+: 0 = most see-through, higher = more frosted
-GLASS_ALPHA = 0.78           # older macOS: 1.0 = opaque blur, lower = clearer
 
 PANEL_W, PANEL_H = 360, 262
 AREA = NSMakeRect(16, 62, 328, 120)
@@ -108,11 +106,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh) SpeedMeter/1.0", "Accept": "*/
 DOWN_CHUNK = 25_000_000
 UP_CHUNK = 8_000_000
 
-STYLE_MASK = 1 << 7          # borderless + non-activating panel
-LEVEL_POPUP = 101
-MASK_LDOWN_RDOWN = (1 << 1) | (1 << 3)
-MASK_LUP_RUP = (1 << 2) | (1 << 4)
-EVENT_RIGHT_UP = 4
 IMAGE_ONLY = 1
 
 
@@ -306,8 +299,9 @@ class MenuBarTextView(NSView):
         return None
 
     @objc.python_method
-    def set_text(self, down_as, up_as):
+    def set_text(self, down_as, up_as, down_len=0, up_len=0):
         self.mb_lines = (self.mb_arrow_dn, down_as, self.mb_arrow_up, up_as)
+        self.mb_lens = (down_len, up_len)
         self.setNeedsDisplay_(True)
 
     @objc.python_method
@@ -316,14 +310,11 @@ class MenuBarTextView(NSView):
         line_h = MENUBAR_LINE_HEIGHT
         y0 = (h - 2 * line_h) / 2
         y_down, y_up = y0 + line_h, y0
-        num_x = MENUBAR_PAD + cfg["arrow_w"] + MENUBAR_GAP
         self.mb_pts_h = h
-        self.mb_pts = (
-            NSMakePoint(MENUBAR_PAD, y_down + (line_h - cfg["arrow_h"]["▼"]) / 2),
-            NSMakePoint(num_x, y_down + (line_h - cfg["num_h"]) / 2),
-            NSMakePoint(MENUBAR_PAD, y_up + (line_h - cfg["arrow_h"]["▲"]) / 2),
-            NSMakePoint(num_x, y_up + (line_h - cfg["num_h"]) / 2),
-        )
+        self.mb_y_down_arr = y_down + (line_h - cfg["arrow_h"]["▼"]) / 2
+        self.mb_y_down_num = y_down + (line_h - cfg["num_h"]) / 2
+        self.mb_y_up_arr = y_up + (line_h - cfg["arrow_h"]["▲"]) / 2
+        self.mb_y_up_num = y_up + (line_h - cfg["num_h"]) / 2
 
     def drawRect_(self, rect):
         lines = getattr(self, "mb_lines", None)
@@ -332,8 +323,20 @@ class MenuBarTextView(NSView):
         h = self.bounds().size.height
         if getattr(self, "mb_pts_h", None) != h:
             self.mb_compute_points(h)
-        for text, pt in zip(lines, self.mb_pts):
-            text.drawAtPoint_(pt)
+        cfg = self.mb_cfg
+        arrow_dn, down_as, arrow_up, up_as = lines
+        down_len, up_len = getattr(self, "mb_lens", (0, 0))
+        num_x = MENUBAR_PAD + cfg["arrow_w"] + MENUBAR_GAP
+        char_w = cfg["char_w"]
+        max_d = cfg["max_digits"]
+
+        x_down = num_x + max(0, max_d - down_len) * char_w
+        x_up = num_x + max(0, max_d - up_len) * char_w
+
+        arrow_dn.drawAtPoint_(NSMakePoint(MENUBAR_PAD, self.mb_y_down_arr))
+        down_as.drawAtPoint_(NSMakePoint(x_down, self.mb_y_down_num))
+        arrow_up.drawAtPoint_(NSMakePoint(MENUBAR_PAD, self.mb_y_up_arr))
+        up_as.drawAtPoint_(NSMakePoint(x_up, self.mb_y_up_num))
 
 
 class RingView(NSView):
@@ -549,14 +552,6 @@ STYLES = [("Bars", BarsStyle), ("Gauge", GaugeStyle), ("Graph", GraphStyle)]
 # --------------------------------------------------------------------------
 # Objective-C plumbing
 # --------------------------------------------------------------------------
-class GlassPanel(NSPanel):
-    def canBecomeKeyWindow(self):
-        return True
-
-    def canBecomeMainWindow(self):
-        return False
-
-
 class Controller(NSObject):
     def initWithApp_(self, app):
         self = objc.super(Controller, self).init()
@@ -565,8 +560,11 @@ class Controller(NSObject):
         self._app = app
         return self
 
-    def statusClicked_(self, sender):
-        self._app.on_status_click()
+    def menuWillOpen_(self, menu):
+        self._app.on_menu_open()
+
+    def menuDidClose_(self, menu):
+        self._app.on_menu_close()
 
     def runTest_(self, sender):
         self._app.start_test()
@@ -600,14 +598,13 @@ class SpeedMeter(rumps.App):
 
         self.controller = Controller.alloc().initWithApp_(self)
         self._status_item = None
-        self.panel = None
+        self._nsmenu = None
+        self._nsmenu_item = None
         self.container = None
         self.style = None
         self.status_label = None
         self.run_btn = None
         self.panel_visible = False
-        self._click_monitor = None
-        self._hidden_at = 0.0
 
         idx = int(NSUserDefaults.standardUserDefaults().integerForKey_(PREF_KEY))
         self.style_idx = idx if 0 <= idx < len(STYLES) else 0
@@ -630,19 +627,22 @@ class SpeedMeter(rumps.App):
     def _bootstrap(self, timer):
         timer.stop()
         self._status_item = self._nsapp.nsstatusitem
-        self._status_item.setMenu_(None)
         btn = self._status_item.button()
         btn.setTitle_("")
         btn.setImagePosition_(IMAGE_ONLY)
-        btn.setTarget_(self.controller)
-        btn.setAction_("statusClicked:")
-        btn.sendActionOn_(MASK_LUP_RUP)
-        btn.setWantsLayer_(True)          # layer paints the rounded "selected" pill
-        lay = btn.layer()
-        lay.setCornerRadius_(PILL_RADIUS)
-        curve(lay)
+
         self._init_menubar_metrics()
         self._set_menubar("0K", "0K")
+
+        # Approach B: Native NSMenu with Speed Meter dashboard embedded in an NSMenuItem
+        self._nsmenu = NSMenu.alloc().init()
+        self._nsmenu.setDelegate_(self.controller)
+        self._nsmenu_item = NSMenuItem.alloc().init()
+        self._build_panel()
+        self._nsmenu_item.setView_(self.container)
+        self._nsmenu.addItem_(self._nsmenu_item)
+        self._status_item.setMenu_(self._nsmenu)
+
         nc = NSWorkspace.sharedWorkspace().notificationCenter()   # pause timer while display sleeps
         nc.addObserver_selector_name_object_(
             self.controller, "screensSleep:", "NSWorkspaceScreensDidSleepNotification", None)
@@ -655,6 +655,7 @@ class SpeedMeter(rumps.App):
         if t is not None:
             try:
                 t.setTolerance_(TICK_TOLERANCE)
+                NSRunLoop.currentRunLoop().addTimer_forMode_(t, NSRunLoopCommonModes)
             except Exception:
                 pass
 
@@ -684,17 +685,23 @@ class SpeedMeter(rumps.App):
         u = NSString.stringWithString_("▲").sizeWithAttributes_(arr_attrs)
         self._mb_char_w = zero.width          # monospaced: every glyph the same width
         self._mb_arrow_w = max(d.width, u.width)
+        self._mb_length = math.ceil(
+            self._mb_arrow_w + MENUBAR_GAP + MENUBAR_DIGITS * self._mb_char_w
+        ) + 2 * MENUBAR_PAD
 
         self._mb_num_ns = NSDictionary.dictionaryWithDictionary_(num_attrs)
         arr_ns = NSDictionary.dictionaryWithDictionary_(arr_attrs)
         self._mb_as_cache = {}
 
+        self._status_item.setLength_(self._mb_length)
         btn = self._status_item.button()
         view = MenuBarTextView.alloc().initWithFrame_(btn.bounds())
         view.setAutoresizingMask_(18)         # width + height sizable
         view.mb_cfg = {
             "num_h": zero.height, "arrow_h": {"▼": d.height, "▲": u.height},
             "arrow_w": self._mb_arrow_w,
+            "char_w": self._mb_char_w,
+            "max_digits": MENUBAR_DIGITS,
         }
         view.mb_arrow_dn = NSAttributedString.alloc().initWithString_attributes_("▼", arr_ns)
         view.mb_arrow_up = NSAttributedString.alloc().initWithString_attributes_("▲", arr_ns)
@@ -716,49 +723,14 @@ class SpeedMeter(rumps.App):
         if key == self._last_title or self._status_item is None or self._mb_view is None:
             return
         self._last_title = key
-        v = self._mb_view
-        v.set_text(self._mb_attr(down), self._mb_attr(up))
-        length = math.ceil(self._mb_arrow_w + MENUBAR_GAP
-                           + max(len(down), len(up)) * self._mb_char_w) + 2 * MENUBAR_PAD
-        if length != self._mb_length:          # item is only as wide as the digits need
-            self._mb_length = length
-            self._status_item.setLength_(length)
-            v.setFrame_(NSMakeRect(0, 0, length, self._status_item.button().bounds().size.height))
+        self._mb_view.set_text(self._mb_attr(down), self._mb_attr(up), len(down), len(up))
 
-    def _sync_highlight(self):
-        if self._status_item is None:
-            return
-        btn = self._status_item.button()
-        lay = btn.layer()
-        if lay is None:
-            return
-        if self.panel_visible:
-            dark = "Dark" in str(btn.effectiveAppearance().name())
-            color = (NSColor.whiteColor().colorWithAlphaComponent_(0.24) if dark
-                     else NSColor.blackColor().colorWithAlphaComponent_(0.14))
-            lay.setBackgroundColor_(color.CGColor())
-        else:
-            lay.setBackgroundColor_(NSColor.clearColor().CGColor())
+    def on_menu_open(self):
+        self.panel_visible = True
+        self._refresh_panel()
 
-    def on_status_click(self):
-        ev = NSApplication.sharedApplication().currentEvent()
-        if ev is not None and ev.type() == EVENT_RIGHT_UP:
-            self._show_context_menu()
-            return
-        if self.panel_visible:
-            self.hide_panel()
-        elif time.monotonic() - self._hidden_at < 0.35:
-            return  # this click already closed the panel via the outside-click monitor
-        else:
-            self.show_panel()
-
-    def _show_context_menu(self):
-        menu = NSMenu.alloc().init()
-        item = menu.addItemWithTitle_action_keyEquivalent_("Quit Speed Meter", "quit:", "")
-        item.setTarget_(self.controller)
-        self._status_item.setMenu_(menu)
-        self._status_item.button().performClick_(None)
-        self._status_item.setMenu_(None)
+    def on_menu_close(self):
+        self.panel_visible = False
 
     # ---- 1 Hz telemetry ----------------------------------------------------
     def tick(self, _):
@@ -796,58 +768,7 @@ class SpeedMeter(rumps.App):
     # ---- panel ------------------------------------------------------------
     def _build_panel(self):
         rect = NSMakeRect(0, 0, PANEL_W, PANEL_H)
-        panel = GlassPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            rect, STYLE_MASK, NSBackingStoreBuffered, False)
-        panel.setLevel_(LEVEL_POPUP)
-        panel.setOpaque_(False)
-        panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(True)
-        panel.setHidesOnDeactivate_(False)
-        panel.setReleasedWhenClosed_(False)
-        panel.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorFullScreenAuxiliary)
-
         container = NSView.alloc().initWithFrame_(rect)
-
-        glass_ok = False
-        try:  # macOS 26+ real Liquid Glass
-            glass = objc.lookUpClass("NSGlassEffectView").alloc().initWithFrame_(rect)
-            glass.setCornerRadius_(26.0)
-            if GLASS_CLEAR:
-                try:
-                    glass.setStyle_(1)
-                except Exception:
-                    pass
-            if GLASS_TINT_ALPHA > 0:
-                try:
-                    glass.setTintColor_(NSColor.windowBackgroundColor()
-                                        .colorWithAlphaComponent_(GLASS_TINT_ALPHA))
-                except Exception:
-                    pass
-            glass.setContentView_(container)
-            panel.setContentView_(glass)
-            glass_ok = True
-        except Exception:
-            pass
-
-        if not glass_ok:  # older macOS: faded blur layer behind the controls
-            root = NSView.alloc().initWithFrame_(rect)
-            effect = NSVisualEffectView.alloc().initWithFrame_(rect)
-            effect.setMaterial_(6)
-            effect.setBlendingMode_(0)
-            effect.setState_(1)
-            effect.setAlphaValue_(GLASS_ALPHA)
-            effect.setWantsLayer_(True)
-            effect.layer().setCornerRadius_(24)
-            curve(effect.layer())
-            effect.layer().setMasksToBounds_(True)
-            effect.layer().setBorderWidth_(0.75)
-            effect.layer().setBorderColor_(
-                NSColor.labelColor().colorWithAlphaComponent_(0.20).CGColor())
-            root.addSubview_(effect)
-            root.addSubview_(container)
-            panel.setContentView_(root)
         self.container = container
 
         container.addSubview_(make_label(
@@ -874,10 +795,10 @@ class SpeedMeter(rumps.App):
         container.addSubview_(self.run_btn)
         container.addSubview_(quit_btn)
 
-        self.panel = panel
         self._apply_style(self.style_idx)
         self.ui_status(*self._status)
         self._apply_btn()
+        return container
 
     def _make_button(self, frame, action):
         b = NSButton.alloc().initWithFrame_(frame)
@@ -906,52 +827,6 @@ class SpeedMeter(rumps.App):
         self.style_idx = idx
         NSUserDefaults.standardUserDefaults().setInteger_forKey_(idx, PREF_KEY)
         self._apply_style(idx)
-
-    def show_panel(self):
-        if self._status_item is None:
-            return
-        if self.panel is None:
-            self._build_panel()
-        win = self._status_item.button().window()
-        br = win.frame()
-        screen = win.screen() or NSScreen.mainScreen()
-        vis = screen.visibleFrame()
-        x = br.origin.x + br.size.width / 2 - PANEL_W / 2
-        x = max(vis.origin.x + 8, min(x, vis.origin.x + vis.size.width - PANEL_W - 8))
-        y = br.origin.y - PANEL_H - 6
-        self.panel.setFrameOrigin_(NSMakePoint(x, y))
-        self.panel.orderFrontRegardless()
-        self.panel.makeKeyWindow()
-        self.panel.invalidateShadow()
-        self.panel_visible = True
-        self._sync_highlight()
-        self._click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            MASK_LDOWN_RDOWN, lambda event: self.hide_panel(from_monitor=True))
-        self._refresh_panel()
-
-    def hide_panel(self, from_monitor=False):
-        if from_monitor:
-            self._hidden_at = time.monotonic()
-        if self.panel is not None:
-            self.panel.orderOut_(None)
-        self.panel_visible = False
-        self._sync_highlight()
-        if self._click_monitor is not None:
-            NSEvent.removeMonitor_(self._click_monitor)
-            self._click_monitor = None
-        self._release_panel()
-
-    def _release_panel(self):
-        """Tear the glass window down while closed so its layers/surfaces are freed."""
-        if self.panel is None:
-            return
-        self.panel.close()
-        self.panel = None
-        self.container = None
-        self.style = None
-        self.status_label = None
-        self.run_btn = None
-        gc.collect()
 
     # ---- UI mutators (main thread only) -----------------------------------
     def ui_status(self, text, color):

@@ -103,9 +103,9 @@ Only one copy runs at a time. A lock file `speed_meter.lock` in the system temp 
 | **Run Full Test** | Start the speed test |
 | **Quit** (panel) | Exit the app |
 
-**Menu bar item.** Two stacked lines: a down arrow with download speed, and an up arrow with upload speed. Units are bytes per second (`K`, `M`). The item width follows the digits, and a rounded translucent pill appears while the panel is open.
+**Menu bar item.** Two stacked lines: a down arrow with download speed, and an up arrow with upload speed. Units are bytes per second (`K`, `M`). The item uses a fixed-width 4-character slot to prevent menu bar jitter, and features 100% native macOS squircle selection highlighting via native menu bar integration.
 
-**Panel.** A borderless, non-activating 360 x 262 panel. Speeds in the panel are shown in **Mbps**, and latency in **ms**.
+**Panel.** An integrated dashboard embedded in the native menu bar dropdown. Speeds in the panel are shown in **Mbps**, and latency in **ms**.
 
 ---
 
@@ -147,13 +147,12 @@ All tunables are plain constants at the top of `speed_meter.py`. Check the file 
 |---|---|
 | `GLASS_TINT_ALPHA` | Frost amount on macOS 26+ (default 0.18) |
 | `GLASS_CLEAR` | Clear or regular glass on macOS 26+ (default True) |
-| `GLASS_ALPHA` | Panel opacity on older macOS (default 0.68) |
-| `MENUBAR_FONT_SIZE` | Font size of the menu bar digits |
-| `ARROW_FONT_SIZE` | Font size of the arrows |
-| `MENUBAR_LINE_HEIGHT` | Vertical spacing of the two lines |
+| `MENUBAR_FONT_SIZE` | Font size of the menu bar digits (default 8.0) |
+| `ARROW_FONT_SIZE` | Font size of the arrows (default 5.5) |
+| `MENUBAR_LINE_HEIGHT` | Vertical spacing of the two lines (default 8.5) |
 | `MENUBAR_GAP` | Gap between arrow and digits |
 | `MENUBAR_PAD` | Horizontal padding of the menu bar item |
-| `PILL_RADIUS` | Corner radius of the "selected" pill |
+| `MENUBAR_DIGITS` | Character slot width (default 4) to prevent menu bar size jumping |
 | `TICK_TOLERANCE` | Timer tolerance for the refresh tick |
 | `PANEL_W`, `PANEL_H` | Panel size (default 360 x 262) |
 | `TEST_DURATION` | Seconds per download and upload phase (default 6) |
@@ -205,11 +204,30 @@ To quit the built app, right-click the menu bar item and choose **Quit**.
 
 ## Download the .app
 
-An optional prebuilt app is attached to each [GitHub Release](https://github.com/beingbrijesh/Internet-Speed-Meter/releases).
+Prebuilt apps are attached to each [GitHub Release](https://github.com/beingbrijesh/Internet-Speed-Meter/releases).
 
 - Apple Silicon only
 - **Ad-hoc signed and not notarized**, so macOS will warn you the first time
-- The SHA-256 of each zip is listed in the release notes
+- The SHA-256 checksum of each release is listed below and in the GitHub release notes
+
+### Choose Your Version
+
+Both versions are actively maintained and available for download:
+
+| Release | Status | Key Highlights | Download & Checksum |
+|---|---|---|---|
+| **[v1.1.0](https://github.com/beingbrijesh/Internet-Speed-Meter/releases/tag/v1.1.0)** | **Latest (Recommended)** | • 100% Native macOS squircle menu selection<br>• Fixed-width anti-jitter menu bar icon<br>• ~3.5 pt vertical padding (no edge crowding)<br>• Live telemetry runs uninterrupted when open | [**SpeedMeter-arm64.zip**](https://github.com/beingbrijesh/Internet-Speed-Meter/releases/download/v1.1.0/SpeedMeter-arm64.zip)<br>`162262ddc34cd027ad34922fda399430b79cf4f001cdff9067e615500ba54a68` |
+| **[v1.0.0](https://github.com/beingbrijesh/Internet-Speed-Meter/releases/tag/v1.0.0)** | **Legacy / Original** | • Custom floating `NSPanel` liquid glass window<br>• Variable-width menu bar item<br>• Custom `CALayer` pill highlight | [**SpeedMeter-arm64.zip**](https://github.com/beingbrijesh/Internet-Speed-Meter/releases/download/v1.0.0/SpeedMeter-arm64.zip)<br>`cd77e3555a1151f18338fd7c2b7323009aa503396f943bb21799e4e66ca3fd4e` |
+
+#### Detailed Version Differences
+
+| Feature / Behavior | v1.1.0 (Latest / Recommended) | v1.0.0 (Legacy) |
+|---|---|---|
+| **Highlight Style** | 100% Native macOS system highlight (exact Apple roundness & vibrancy) | Custom layer highlight (`CALayer`) with fixed 7pt radius |
+| **Menu Bar Width** | Fixed-width (anti-jitter; icons stay stationary) | Variable-width (resizes dynamically with number of digits) |
+| **Window Architecture** | Native `NSMenu` / `NSMenuItem` container | Custom `NSPanel` (`GlassPanel`) floating window |
+| **Vertical Padding** | ~3.5 pt top & bottom breathing room | Edge-to-edge (~0.5–1.0 pt margin) |
+| **Dismissal Behavior** | Native macOS menu outside-click dismissal | Custom global mouse event tracking monitor |
 
 Verify the download:
 
@@ -217,7 +235,7 @@ Verify the download:
 shasum -a 256 ~/Downloads/SpeedMeter-arm64.zip
 ```
 
-Compare the result with the checksum in the release notes.
+Compare the result with the checksum listed above.
 
 ### Opening it the first time
 
@@ -282,9 +300,9 @@ sequenceDiagram
 
 Key pieces:
 
-- **`MenuBarTextView`**: a transparent custom view that draws the two menu bar lines and the selected pill.
-- **Panel**: a borderless non-activating `NSPanel`. On macOS 26+ it hosts an `NSGlassEffectView`. On earlier versions it uses `NSVisualEffectView` with a faded alpha.
-- **Sampling**: `psutil` network counters are read on a timer and converted to bytes per second.
+- **`MenuBarTextView`**: a transparent custom view that draws the two menu bar lines with fixed-width anti-jitter formatting and vertical padding.
+- **Dashboard View**: hosted directly inside a native `NSMenuItem`, delegating menu selection highlight, squircle curvature, and vibrancy blur directly to macOS WindowServer.
+- **Sampling**: `psutil` network counters are read on a timer scheduled in `NSRunLoopCommonModes` so updates continue while the menu is open.
 - **Speed test**: runs off the main thread and posts live updates back to the UI.
 
 ---
